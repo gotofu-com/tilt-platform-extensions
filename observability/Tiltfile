@@ -65,16 +65,9 @@ def deploy_observability_stack(
     tempo_version='1.24.4',
     alloy_version='1.5.3',
     grafana_admin_password='admin',
-    grafana_port=3002,
-    prometheus_port=9091,
-    loki_port=3100,
-    tempo_grpc_port=4317,
-    tempo_http_port=4318,
-    tempo_query_port=3200,
     enable_loki=True,
     enable_tempo=True,
     enable_alloy=True,
-    enable_prometheus_port_forward=True,
     prometheus_extra_set=[],
     loki_extra_set=[],
     tempo_extra_set=[],
@@ -93,16 +86,9 @@ def deploy_observability_stack(
         tempo_version: Tempo Helm chart version.
         alloy_version: Alloy Helm chart version.
         grafana_admin_password: Grafana admin password.
-        grafana_port: Host port for Grafana.
-        prometheus_port: Host port for Prometheus.
-        loki_port: Host port for Loki.
-        tempo_grpc_port: Host port for Tempo gRPC.
-        tempo_http_port: Host port for Tempo HTTP.
-        tempo_query_port: Host port for Tempo query frontend.
         enable_loki: Toggle Loki deployment.
         enable_tempo: Toggle Tempo deployment.
         enable_alloy: Toggle Alloy deployment.
-        enable_prometheus_port_forward: Toggle Prometheus port-forward local_resource.
         prometheus_extra_set: Extra Helm set values for kube-prometheus-stack.
         loki_extra_set: Extra Helm set values for Loki.
         tempo_extra_set: Extra Helm set values for Tempo.
@@ -178,7 +164,6 @@ def deploy_observability_stack(
 
     k8s_resource(
         'kube-prometheus-stack-grafana',
-        port_forwards=['{port}:3000'.format(port=grafana_port)],
         labels=labels,
         new_name='grafana',
     )
@@ -239,7 +224,6 @@ def deploy_observability_stack(
 
         k8s_resource(
             'loki',
-            port_forwards=['{port}:3100'.format(port=loki_port)],
             labels=labels,
         )
 
@@ -304,25 +288,7 @@ data:
 
         k8s_resource(
             'tempo',
-            port_forwards=[
-                '{port}:4317'.format(port=tempo_grpc_port),
-                '{port}:4318'.format(port=tempo_http_port),
-                '{port}:3200'.format(port=tempo_query_port),
-            ],
             labels=labels,
-        )
-
-    # --- Prometheus Port Forward ---
-    if enable_prometheus_port_forward:
-        local_resource(
-            'prometheus-port-forward',
-            serve_cmd='kubectl port-forward -n {ns} svc/kube-prometheus-stack-prometheus {port}:9090'.format(
-                ns=namespace,
-                port=prometheus_port,
-            ),
-            resource_deps=['prometheus-operator'],
-            labels=labels,
-            links=['http://localhost:{port}'.format(port=prometheus_port)],
         )
 
     # --- Grafana Dashboards ---
