@@ -1,0 +1,337 @@
+# -*- mode: Python -*-
+
+load('ext://helm_remote', 'helm_remote')
+
+_DEFAULT_ALLOY_CONFIG = """
+    discovery.kubernetes "pods" {{
+      role = "pod"
+    }}
+
+    // Add namespace/pod/container labels from K8s metadata
+    discovery.relabel "pod_logs" {{
+      targets = discovery.kubernetes.pods.targets
+
+      rule {{
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }}
+      rule {{
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }}
+      rule {{
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }}
+      rule {{
+        source_labels = ["__meta_kubernetes_pod_node_name"]
+        target_label  = "node"
+      }}
+    }}
+
+    loki.source.kubernetes "pods" {{
+      targets    = discovery.relabel.pod_logs.output
+      forward_to = [loki.process.json_extract.receiver]
+    }}
+
+    loki.process "json_extract" {{
+      stage.json {{
+        expressions = {{
+          level  = "level",
+          module = "module",
+        }}
+      }}
+      stage.labels {{
+        values = {{
+          level  = "",
+          module = "",
+        }}
+      }}
+      forward_to = [loki.write.default.receiver]
+    }}
+
+    loki.write "default" {{
+      endpoint {{
+        url = "http://loki.{namespace}.svc.cluster.local:3100/loki/api/v1/push"
+      }}
+    }}
+"""
+
+
+def deploy_observability_stack(
+    namespace='monitoring',
+    prometheus_version='81.4.1',
+    loki_version='6.51.0',
+    tempo_version='1.24.4',
+    alloy_version='1.5.3',
+    grafana_admin_password='admin',
+    grafana_port=3002,
+    prometheus_port=9091,
+    loki_port=3100,
+    tempo_grpc_port=4317,
+    tempo_http_port=4318,
+    tempo_query_port=3200,
+    enable_loki=True,
+    enable_tempo=True,
+    enable_alloy=True,
+    enable_prometheus_port_forward=True,
+    prometheus_extra_set=[],
+    loki_extra_set=[],
+    tempo_extra_set=[],
+    alloy_extra_set=[],
+    alloy_config='',
+    grafana_dashboards_kustomize='',
+    grafana_dashboard_objects=[],
+    labels=['monitoring'],
+):
+    """Deploy a full observability stack: Prometheus, Grafana, Loki, Tempo, Alloy.
+
+    Args:
+        namespace: K8s namespace for the stack.
+        prometheus_version: kube-prometheus-stack Helm chart version.
+        loki_version: Loki Helm chart version.
+        tempo_version: Tempo Helm chart version.
+        alloy_version: Alloy Helm chart version.
+        grafana_admin_password: Grafana admin password.
+        grafana_port: Host port for Grafana.
+        prometheus_port: Host port for Prometheus.
+        loki_port: Host port for Loki.
+        tempo_grpc_port: Host port for Tempo gRPC.
+        tempo_http_port: Host port for Tempo HTTP.
+        tempo_query_port: Host port for Tempo query frontend.
+        enable_loki: Toggle Loki deployment.
+        enable_tempo: Toggle Tempo deployment.
+        enable_alloy: Toggle Alloy deployment.
+        enable_prometheus_port_forward: Toggle Prometheus port-forward local_resource.
+        prometheus_extra_set: Extra Helm set values for kube-prometheus-stack.
+        loki_extra_set: Extra Helm set values for Loki.
+        tempo_extra_set: Extra Helm set values for Tempo.
+        alloy_extra_set: Extra Helm set values for Alloy.
+        alloy_config: Raw Alloy config string (uses built-in default if empty).
+        grafana_dashboards_kustomize: Path to project dashboards kustomize dir.
+        grafana_dashboard_objects: List of 'name:kind' strings for dashboard k8s_resource grouping.
+        labels: Tilt UI labels.
+    """
+
+    # --- kube-prometheus-stack ---
+    prometheus_set = [
+        'alertmanager.enabled=false',
+        'nodeExporter.enabled=false',
+        'kubeStateMetrics.enabled=false',
+        'prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false',
+        'grafana.adminPassword={}'.format(grafana_admin_password),
+    ]
+
+    # Auto-wire Loki datasource if enabled
+    if enable_loki:
+        prometheus_set += [
+            'grafana.additionalDataSources[0].name=Loki',
+            'grafana.additionalDataSources[0].type=loki',
+            'grafana.additionalDataSources[0].url=http://loki.{ns}.svc.cluster.local:3100'.format(ns=namespace),
+            'grafana.additionalDataSources[0].access=proxy',
+            'grafana.additionalDataSources[0].jsonData.maxLines=1000',
+        ]
+
+    # Auto-wire Tempo datasource if enabled
+    if enable_tempo:
+        ds_index = 1 if enable_loki else 0
+        prometheus_set += [
+            'grafana.additionalDataSources[{i}].name=Tempo'.format(i=ds_index),
+            'grafana.additionalDataSources[{i}].type=tempo'.format(i=ds_index),
+            'grafana.additionalDataSources[{i}].url=http://tempo.{ns}.svc.cluster.local:3200'.format(i=ds_index, ns=namespace),
+            'grafana.additionalDataSources[{i}].access=proxy'.format(i=ds_index),
+            'grafana.additionalDataSources[{i}].jsonData.tracesToLogsV2.datasourceUid=loki'.format(i=ds_index),
+            'grafana.additionalDataSources[{i}].jsonData.tracesToLogsV2.filterByTraceID=true'.format(i=ds_index),
+            'grafana.additionalDataSources[{i}].jsonData.tracesToMetrics.datasourceUid=prometheus'.format(i=ds_index),
+            'grafana.additionalDataSources[{i}].jsonData.nodeGraph.enabled=true'.format(i=ds_index),
+            'grafana.additionalDataSources[{i}].jsonData.serviceMap.datasourceUid=prometheus'.format(i=ds_index),
+        ]
+
+    prometheus_set += prometheus_extra_set
+
+    helm_remote(
+        'kube-prometheus-stack',
+        repo_url='https://prometheus-community.github.io/helm-charts',
+        version=prometheus_version,
+        namespace=namespace,
+        create_namespace=True,
+        set=prometheus_set,
+    )
+
+    k8s_resource(
+        'kube-prometheus-stack-operator',
+        labels=labels,
+        new_name='prometheus-operator',
+    )
+
+    k8s_resource(
+        'kube-prometheus-stack-admission-create',
+        labels=labels,
+        new_name='prometheus-admission-create',
+    )
+
+    k8s_resource(
+        'kube-prometheus-stack-admission-patch',
+        labels=labels,
+        new_name='prometheus-admission-patch',
+    )
+
+    k8s_resource(
+        'kube-prometheus-stack-grafana',
+        port_forwards=['{port}:3000'.format(port=grafana_port)],
+        labels=labels,
+        new_name='grafana',
+    )
+
+    # Group all remaining kube-prometheus-stack non-workload objects
+    k8s_resource(
+        objects=[
+            'kube-prometheus-stack-prometheus:prometheus',
+            'kube-prometheus-stack-prometheus:service',
+            'kube-prometheus-stack-prometheus:serviceaccount',
+            'kube-prometheus-stack-prometheus:clusterrole',
+            'kube-prometheus-stack-prometheus:clusterrolebinding',
+            'kube-prometheus-stack-prometheus:servicemonitor',
+            'kube-prometheus-stack-prometheus:prometheusrule',
+            'kube-prometheus-stack-prometheus:configmap',
+            'kube-prometheus-stack-admission:serviceaccount',
+            'kube-prometheus-stack-admission:clusterrole',
+            'kube-prometheus-stack-admission:clusterrolebinding',
+            'kube-prometheus-stack-admission:role',
+            'kube-prometheus-stack-admission:rolebinding',
+            'kube-prometheus-stack-admission:mutatingwebhookconfiguration',
+            'kube-prometheus-stack-admission:validatingwebhookconfiguration',
+            'kube-prometheus-stack-operator:clusterrole',
+            'kube-prometheus-stack-operator:clusterrolebinding',
+            'kube-prometheus-stack-operator:servicemonitor',
+        ],
+        new_name='prometheus-config',
+        labels=labels,
+    )
+
+    # --- Loki (Log Storage) ---
+    if enable_loki:
+        loki_set = [
+            'loki.auth_enabled=false',
+            'deploymentMode=SingleBinary',
+            'loki.commonConfig.replication_factor=1',
+            'loki.storage.type=filesystem',
+            'singleBinary.replicas=1',
+            'loki.schemaConfig.configs[0].from=2024-01-01',
+            'loki.schemaConfig.configs[0].store=tsdb',
+            'loki.schemaConfig.configs[0].object_store=filesystem',
+            'loki.schemaConfig.configs[0].schema=v13',
+            'loki.schemaConfig.configs[0].index.prefix=index_',
+            'loki.schemaConfig.configs[0].index.period=24h',
+            'read.replicas=0',
+            'backend.replicas=0',
+            'write.replicas=0',
+        ] + loki_extra_set
+
+        helm_remote(
+            'loki',
+            repo_url='https://grafana.github.io/helm-charts',
+            version=loki_version,
+            namespace=namespace,
+            create_namespace=False,
+            set=loki_set,
+        )
+
+        k8s_resource(
+            'loki',
+            port_forwards=['{port}:3100'.format(port=loki_port)],
+            labels=labels,
+        )
+
+    # --- Grafana Alloy (Log Collector) ---
+    if enable_alloy:
+        alloy_set = [
+            'alloy.configMap.create=false',
+            'alloy.configMap.name=alloy-config',
+            'alloy.configMap.key=config.alloy',
+            'alloy.mounts.varlog=true',
+            'alloy.mounts.dockercontainers=true',
+            'alloy.stabilityLevel=public-preview',
+        ] + alloy_extra_set
+
+        helm_remote(
+            'alloy',
+            repo_url='https://grafana.github.io/helm-charts',
+            version=alloy_version,
+            namespace=namespace,
+            create_namespace=False,
+            set=alloy_set,
+        )
+
+        # Use provided alloy_config or built-in default
+        effective_alloy_config = alloy_config if alloy_config else _DEFAULT_ALLOY_CONFIG.format(namespace=namespace)
+
+        k8s_yaml(blob("""
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: {namespace}
+data:
+  config.alloy: |
+{config}
+""".format(namespace=namespace, config=effective_alloy_config)))
+
+        alloy_deps = ['loki'] if enable_loki else []
+        k8s_resource(
+            'alloy',
+            resource_deps=alloy_deps,
+            labels=labels,
+        )
+
+    # --- Tempo (Distributed Tracing) ---
+    if enable_tempo:
+        tempo_set = [
+            'tempo.storage.trace.backend=local',
+            'tempo.storage.trace.local.path=/var/tempo/traces',
+            'tempo.receivers.otlp.protocols.grpc.endpoint=0.0.0.0:4317',
+            'tempo.receivers.otlp.protocols.http.endpoint=0.0.0.0:4318',
+        ] + tempo_extra_set
+
+        helm_remote(
+            'tempo',
+            repo_url='https://grafana.github.io/helm-charts',
+            version=tempo_version,
+            namespace=namespace,
+            create_namespace=False,
+            set=tempo_set,
+        )
+
+        k8s_resource(
+            'tempo',
+            port_forwards=[
+                '{port}:4317'.format(port=tempo_grpc_port),
+                '{port}:4318'.format(port=tempo_http_port),
+                '{port}:3200'.format(port=tempo_query_port),
+            ],
+            labels=labels,
+        )
+
+    # --- Prometheus Port Forward ---
+    if enable_prometheus_port_forward:
+        local_resource(
+            'prometheus-port-forward',
+            serve_cmd='kubectl port-forward -n {ns} svc/kube-prometheus-stack-prometheus {port}:9090'.format(
+                ns=namespace,
+                port=prometheus_port,
+            ),
+            resource_deps=['prometheus-operator'],
+            labels=labels,
+            links=['http://localhost:{port}'.format(port=prometheus_port)],
+        )
+
+    # --- Grafana Dashboards ---
+    if grafana_dashboards_kustomize:
+        k8s_yaml(kustomize(grafana_dashboards_kustomize))
+
+        if grafana_dashboard_objects:
+            k8s_resource(
+                objects=grafana_dashboard_objects,
+                new_name='grafana-dashboards',
+                labels=labels,
+            )

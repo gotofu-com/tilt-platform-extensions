@@ -1,0 +1,82 @@
+# -*- mode: Python -*-
+
+load('ext://helm_remote', 'helm_remote')
+
+
+def deploy_doppler_operator(
+    project,
+    namespace,
+    config='dev',
+    token_name='tilt-token',
+    doppler_secrets_kustomize='',
+    doppler_secret_objects=[],
+    labels=['secrets'],
+):
+    """Deploy Doppler operator with ephemeral service token lifecycle.
+
+    Args:
+        project: Doppler project name (required).
+        namespace: K8s namespace for the token secret (required).
+        config: Doppler config name.
+        token_name: Ephemeral token name.
+        doppler_secrets_kustomize: Path to DopplerSecret CRD kustomize dir.
+        doppler_secret_objects: List of 'name:kind' strings for k8s_resource grouping.
+        labels: Tilt UI labels.
+    """
+
+    # Install Doppler operator via Helm
+    helm_remote(
+        'doppler-kubernetes-operator',
+        repo_url='https://helm.doppler.com',
+        namespace='doppler-operator-system',
+        create_namespace=True,
+    )
+
+    # Revoke any existing ephemeral token, then create a fresh one
+    local(
+        'doppler configs tokens revoke {token_name} --project {project} --config {config} --yes 2>/dev/null || true'.format(
+            token_name=token_name,
+            project=project,
+            config=config,
+        ),
+        quiet=True,
+    )
+    doppler_token = str(local(
+        'doppler configs tokens create {token_name} --project {project} --config {config} --plain'.format(
+            token_name=token_name,
+            project=project,
+            config=config,
+        ),
+        quiet=True,
+    )).strip()
+
+    # Create the token K8s secret dynamically
+    k8s_yaml(blob("""
+apiVersion: v1
+kind: Secret
+metadata:
+  name: doppler-token-secret
+  namespace: {namespace}
+type: Opaque
+stringData:
+  serviceToken: {token}
+""".format(namespace=namespace, token=doppler_token)))
+
+    k8s_resource(
+        objects=['doppler-token-secret:secret'],
+        new_name='doppler-token-secret',
+        labels=labels,
+    )
+
+    # Optionally load DopplerSecret CRDs from caller's kustomize path
+    if doppler_secrets_kustomize:
+        k8s_yaml(kustomize(doppler_secrets_kustomize))
+
+    # Group DopplerSecret objects if provided
+    if doppler_secret_objects:
+        k8s_resource(
+            objects=doppler_secret_objects,
+            new_name='doppler-secrets',
+            resource_deps=['doppler-token-secret'],
+            labels=labels,
+        )
