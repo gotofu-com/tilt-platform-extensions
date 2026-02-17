@@ -38,11 +38,11 @@ def deploy_doppler_operator(
 
     # Revoke this developer's existing token by slug, then create a fresh one
     local(
-        'for slug in $(doppler configs tokens -p {project} -c {config} --json 2>/dev/null'
-        ' | python3 -c "import sys,json;[print(t[\'slug\']) for t in (json.load(sys.stdin) or [])'
-        ' if t[\'name\']==\'{dev_token_name}\']"); do'
-        ' echo y | doppler configs tokens revoke --slug "$slug" -p {project} -c {config} --silent;'
-        ' done || true'.format(
+        "for slug in $(doppler configs tokens -p {project} -c {config} --json 2>/dev/null"
+        " | python3 -c \"import sys,json;[print(t['slug']) for t in (json.load(sys.stdin) or [])"
+        " if t['name']=='{dev_token_name}']\"); do"
+        " echo y | doppler configs tokens revoke --slug \"$slug\" -p {project} -c {config} --silent;"
+        " done || true".format(
             dev_token_name=dev_token_name,
             project=project,
             config=config,
