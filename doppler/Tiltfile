@@ -32,9 +32,13 @@ def deploy_doppler_operator(
         create_namespace=True,
     )
 
-    # Revoke any existing ephemeral token, then create a fresh one
+    # Revoke any existing ephemeral tokens by slug (names are not unique identifiers)
     local(
-        'doppler configs tokens revoke {token_name} --project {project} --config {config} --yes 2>/dev/null || true'.format(
+        'for slug in $(doppler configs tokens -p {project} -c {config} --json 2>/dev/null'
+        ' | python3 -c "import sys,json;[print(t[\'slug\']) for t in (json.load(sys.stdin) or [])'
+        ' if t[\'name\']==\'{token_name}\']"); do'
+        ' echo y | doppler configs tokens revoke --slug "$slug" -p {project} -c {config} --silent;'
+        ' done || true'.format(
             token_name=token_name,
             project=project,
             config=config,
