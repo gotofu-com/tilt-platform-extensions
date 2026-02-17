@@ -36,13 +36,21 @@ def deploy_doppler_operator(
     username = str(local('whoami', quiet=True)).strip()
     dev_token_name = '{}-{}'.format(token_name, username)
 
-    # Revoke this developer's existing token by slug, then create a fresh one
+    # Revoke this developer's existing tokens by slug, then create a fresh one
+    revoke_cmd = (
+        'doppler configs tokens -p {project} -c {config} --json 2>/dev/null'
+        + " | python3 -c '"
+        + 'import sys,json\n'
+        + 'for t in (json.load(sys.stdin) or []):\n'
+        + '  if t["name"]==sys.argv[1]: print(t["slug"])'
+        + "' {dev_token_name}"
+        + ' | while read slug; do'
+        + ' echo y | doppler configs tokens revoke --slug $slug'
+        + ' -p {project} -c {config} --silent 2>/dev/null;'
+        + ' done || true'
+    )
     local(
-        "for slug in $(doppler configs tokens -p {project} -c {config} --json 2>/dev/null"
-        " | python3 -c \"import sys,json;[print(t['slug']) for t in (json.load(sys.stdin) or [])"
-        " if t['name']=='{dev_token_name}']\"); do"
-        " echo y | doppler configs tokens revoke --slug \"$slug\" -p {project} -c {config} --silent;"
-        " done || true".format(
+        revoke_cmd.format(
             dev_token_name=dev_token_name,
             project=project,
             config=config,
