@@ -32,18 +32,26 @@ def deploy_doppler_operator(
         create_namespace=True,
     )
 
-    # Revoke any existing ephemeral token, then create a fresh one
+    # Scope token per developer (e.g. tilt-token-marcusdb) — safe to revoke without affecting others
+    username = str(local('whoami', quiet=True)).strip()
+    dev_token_name = '{}-{}'.format(token_name, username)
+
+    # Revoke this developer's existing token by slug, then create a fresh one
     local(
-        'doppler configs tokens revoke {token_name} --project {project} --config {config} --yes 2>/dev/null || true'.format(
-            token_name=token_name,
+        'for slug in $(doppler configs tokens -p {project} -c {config} --json 2>/dev/null'
+        ' | python3 -c "import sys,json;[print(t[\'slug\']) for t in (json.load(sys.stdin) or [])'
+        ' if t[\'name\']==\'{dev_token_name}\']"); do'
+        ' echo y | doppler configs tokens revoke --slug "$slug" -p {project} -c {config} --silent;'
+        ' done || true'.format(
+            dev_token_name=dev_token_name,
             project=project,
             config=config,
         ),
         quiet=True,
     )
     doppler_token = str(local(
-        'doppler configs tokens create {token_name} --project {project} --config {config} --plain'.format(
-            token_name=token_name,
+        'doppler configs tokens create {dev_token_name} --project {project} --config {config} --plain'.format(
+            dev_token_name=dev_token_name,
             project=project,
             config=config,
         ),
